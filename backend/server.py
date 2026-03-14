@@ -281,6 +281,34 @@ class PhonePart(BaseModel):
     quantity: int
     created_at: str
 
+# Spare Parts Inventory Models
+class SparePartCreate(BaseModel):
+    name: str
+    quantity: int
+    cost_per_unit: float
+    phone_models: Optional[list] = []  # Compatible phone models
+    notes: Optional[str] = None
+
+class SparePartUpdate(BaseModel):
+    name: Optional[str] = None
+    quantity: Optional[int] = None
+    cost_per_unit: Optional[float] = None
+    phone_models: Optional[list] = None
+    notes: Optional[str] = None
+    archived: Optional[bool] = None
+
+class SparePart(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    name: str
+    quantity: int
+    cost_per_unit: float
+    phone_models: list
+    notes: Optional[str] = None
+    archived: bool = False
+    created_at: str
+    updated_at: Optional[str] = None
+
 # Work Session Models (نظام تسجيل الدخول/الخروج)
 class WorkSession(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1417,6 +1445,149 @@ async def get_repair_debts_stats(current_user: dict = Depends(get_current_user))
         "total_paid": total_paid,
         "total_remaining": total_remaining
     }
+
+# ============== SPARE PARTS INVENTORY ==============
+
+@api_router.post("/spare-parts")
+async def create_spare_part(part_data: SparePartCreate, current_user: dict = Depends(get_current_user)):
+    """إضافة قطعة غيار للمخزن"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    part_id = str(uuid.uuid4())
+    part_doc = {
+        "id": part_id,
+        "name": part_data.name,
+        "quantity": part_data.quantity,
+        "cost_per_unit": part_data.cost_per_unit,
+        "phone_models": part_data.phone_models or [],
+        "notes": part_data.notes,
+        "archived": False,
+        "created_by": current_user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": None
+    }
+    
+    await db.spare_parts.insert_one(part_doc)
+    return {"message": "تم إضافة قطعة الغيار بنجاح", "id": part_id}
+
+@api_router.get("/spare-parts")
+async def get_spare_parts(
+    include_archived: bool = False,
+    search: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """جلب قطع الغيار"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    query = {}
+    if not include_archived:
+        query["archived"] = False
+    
+    if search:
+        query["name"] = {"$regex": search, "$options": "i"}
+    
+    parts = await db.spare_parts.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return parts
+
+@api_router.get("/spare-parts/{part_id}")
+async def get_spare_part(part_id: str, current_user: dict = Depends(get_current_user)):
+    """جلب قطعة غيار واحدة"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    part = await db.spare_parts.find_one({"id": part_id}, {"_id": 0})
+    if not part:
+        raise HTTPException(status_code=404, detail="قطعة الغيار غير موجودة")
+    
+    return part
+
+@api_router.put("/spare-parts/{part_id}")
+async def update_spare_part(
+    part_id: str,
+    part_data: SparePartUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """تحديث قطعة غيار"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    update_data = {k: v for k, v in part_data.dict(exclude_unset=True).items()}
+    if update_data:
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await db.spare_parts.update_one(
+            {"id": part_id},
+            {"$set": update_data}
+        )
+    
+    return {"message": "تم تحديث قطعة الغيار بنجاح"}
+
+@api_router.post("/spare-parts/{part_id}/archive")
+async def archive_spare_part(part_id: str, current_user: dict = Depends(get_current_user)):
+    """أرشفة قطعة غيار (إخفاء مؤقت)"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    await db.spare_parts.update_one(
+        {"id": part_id},
+        {"$set": {
+            "archived": True,
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "archived_by": current_user["id"]
+        }}
+    )
+    
+    return {"message": "تم أرشفة قطعة الغيار بنجاح"}
+
+@api_router.post("/spare-parts/{part_id}/unarchive")
+async def unarchive_spare_part(part_id: str, current_user: dict = Depends(get_current_user)):
+    """إلغاء أرشفة قطعة غيار (إعادة للمخزن)"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    await db.spare_parts.update_one(
+        {"id": part_id},
+        {"$set": {
+            "archived": False,
+            "unarchived_at": datetime.now(timezone.utc).isoformat(),
+            "unarchived_by": current_user["id"]
+        }}
+    )
+    
+    return {"message": "تم إلغاء أرشفة قطعة الغيار بنجاح"}
+
+@api_router.delete("/spare-parts/{part_id}")
+async def delete_spare_part(part_id: str, current_user: dict = Depends(get_current_user)):
+    """حذف قطعة غيار نهائياً"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    await db.spare_parts.delete_one({"id": part_id})
+    return {"message": "تم حذف قطعة الغيار بنجاح"}
+
+@api_router.get("/spare-parts/stats/summary")
+async def get_spare_parts_stats(current_user: dict = Depends(get_current_user)):
+    """إحصائيات المخزن"""
+    if current_user["system"] != "phones":
+        raise HTTPException(status_code=403, detail="هذا النظام مخصص لصيانة الهواتف فقط")
+    
+    all_parts = await db.spare_parts.find({}, {"_id": 0}).to_list(10000)
+    active_parts = [p for p in all_parts if not p.get("archived", False)]
+    archived_parts = [p for p in all_parts if p.get("archived", False)]
+    
+    total_value = sum(p["quantity"] * p["cost_per_unit"] for p in active_parts)
+    low_stock_parts = [p for p in active_parts if p["quantity"] < 5]
+    
+    return {
+        "total_parts": len(active_parts),
+        "archived_parts": len(archived_parts),
+        "total_inventory_value": total_value,
+        "low_stock_count": len(low_stock_parts),
+        "low_stock_parts": low_stock_parts
+    }
+
+# ============== END SPARE PARTS ==============
 
     return {"message": "تم حذف الصيانة بنجاح"}
 
