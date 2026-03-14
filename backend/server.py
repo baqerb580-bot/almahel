@@ -162,6 +162,11 @@ class TokenResponse(BaseModel):
     token: str
     user: User
 
+# System Settings Models
+class SystemSettings(BaseModel):
+    admin_telegram_id: Optional[str] = None
+    delegated_admin_telegram_id: Optional[str] = None
+
 # Task Models (نظام المهام الحالي)
 class TaskCreate(BaseModel):
     customer_name: str
@@ -1868,6 +1873,30 @@ async def get_employee_location(employee_id: str, current_user: dict = Depends(g
     
     return location
 
+@api_router.get("/locations/{task_id}")
+async def get_task_location(task_id: str, current_user: dict = Depends(get_current_user)):
+    """جلب موقع المهمة (موقع الموظف المعين لها)"""
+    if current_user["system"] != "tasks" or current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="الصلاحية للمدير فقط")
+    
+    # جلب المهمة لمعرفة الموظف المعين لها
+    task = await db.tasks.find_one({"id": task_id})
+    if not task:
+        raise HTTPException(status_code=404, detail="المهمة غير موجودة")
+    
+    if not task.get("assigned_to"):
+        return []
+    
+    # جلب جميع مواقع الموظف لهذه المهمة
+    locations = []
+    async for location in db.locations.find(
+        {"employee_id": task["assigned_to"]},
+        {"_id": 0}
+    ).sort("timestamp", -1).limit(100):
+        locations.append(location)
+    
+    return locations
+
 @api_router.post("/employee-location")
 async def save_employee_location(
     location_data: dict,
@@ -2129,6 +2158,45 @@ async def delete_agents_user(user_id: str, current_user: dict = Depends(get_curr
     await db.users.delete_one({"id": user_id, "system": "agents"})
     
     return {"message": "تم حذف المستخدم بنجاح"}
+
+# ============== SYSTEM SETTINGS ==============
+
+@api_router.get("/system-settings")
+async def get_system_settings(current_user: dict = Depends(get_current_user)):
+    """جلب إعدادات النظام"""
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="الصلاحية للمدير فقط")
+    
+    settings = await db.system_settings.find_one({})
+    if not settings:
+        return {
+            "admin_telegram_id": None,
+            "delegated_admin_telegram_id": None
+        }
+    
+    return {
+        "admin_telegram_id": settings.get("admin_telegram_id"),
+        "delegated_admin_telegram_id": settings.get("delegated_admin_telegram_id")
+    }
+
+@api_router.post("/system-settings")
+async def update_system_settings(
+    settings: SystemSettings,
+    current_user: dict = Depends(get_current_user)
+):
+    """تحديث إعدادات النظام"""
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="الصلاحية للمدير فقط")
+    
+    await db.system_settings.delete_many({})
+    await db.system_settings.insert_one({
+        "admin_telegram_id": settings.admin_telegram_id,
+        "delegated_admin_telegram_id": settings.delegated_admin_telegram_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": current_user["id"]
+    })
+    
+    return {"message": "تم تحديث الإعدادات بنجاح"}
 
 # Include router
 app.include_router(api_router)
